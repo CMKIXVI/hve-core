@@ -459,8 +459,8 @@ function Compare-PluginManifest {
         }
         $expectedPaths = @($Expected[$kind])
 
-        $missing = @($expectedPaths | Where-Object { $_ -notin $committedPaths })
-        $extra = @($committedPaths | Where-Object { $_ -notin $expectedPaths })
+        $missing = @($expectedPaths | Where-Object { $_ -cnotin $committedPaths })
+        $extra = @($committedPaths | Where-Object { $_ -cnotin $expectedPaths })
 
         if ($missing.Count -gt 0) {
             $differences += "$kind missing $($missing.Count): $($missing -join ', ')"
