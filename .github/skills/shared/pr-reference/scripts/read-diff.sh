@@ -2,33 +2,18 @@
 # Copyright (c) 2026 Microsoft Corporation. All rights reserved.
 # SPDX-License-Identifier: MIT
 
-# read-diff.sh
-# Reads diff content from a PR reference XML with chunking and file filtering.
-# Supports reading by line range, chunk number, or specific file path.
-
 set -euo pipefail
 
 show_usage() {
   echo "Usage: ${0##*/} [OPTIONS]"
-  echo ""
-  echo "Read diff content from pr-reference.xml with chunking support."
-  echo ""
-  echo "Options:"
-  echo "  --input, -i      Path to pr-reference.xml (default: .copilot-tracking/pr/pr-reference.xml)"
-  echo "  --chunk, -c      Chunk number to read (1-based, default chunk size: 500 lines)"
+  echo "  --input, -i      Path to pr-reference.xml"
+  echo "  --chunk, -c      Chunk number"
   echo "  --chunk-size, -s Lines per chunk (default: 500)"
-  echo "  --lines, -l      Line range to read (format: START,END or START-END)"
-  echo "  --file, -f       Extract diff for a specific file path"
-  echo "  --summary        Show diff summary only (file list with stats)"
-  echo "  --info           Show chunk information without content"
-  echo "  --help, -h       Show this help message"
-  echo ""
-  echo "Examples:"
-  echo "  ${0##*/} --chunk 1                     # Read first 500 lines of diff"
-  echo "  ${0##*/} --chunk 2 --chunk-size 300    # Read lines 301-600"
-  echo "  ${0##*/} --lines 100,500               # Read lines 100-500"
-  echo "  ${0##*/} --file src/main.ts            # Extract diff for specific file"
-  echo "  ${0##*/} --info                        # Show chunk breakdown"
+  echo "  --lines, -l      Line range START,END or START-END"
+  echo "  --file, -f       Extract diff for a file"
+  echo "  --summary        Show diff summary"
+  echo "  --info           Show chunk information"
+  echo "  --help, -h       Show this help"
   exit 1
 }
 
@@ -43,41 +28,15 @@ SHOW_INFO=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --input|-i)
-      INPUT_FILE="$2"
-      shift 2
-      ;;
-    --chunk|-c)
-      CHUNK_NUM="$2"
-      shift 2
-      ;;
-    --chunk-size|-s)
-      CHUNK_SIZE="$2"
-      shift 2
-      ;;
-    --lines|-l)
-      LINE_RANGE="$2"
-      shift 2
-      ;;
-    --file|-f)
-      FILE_PATH="$2"
-      shift 2
-      ;;
-    --summary)
-      SHOW_SUMMARY=true
-      shift
-      ;;
-    --info)
-      SHOW_INFO=true
-      shift
-      ;;
-    --help|-h)
-      show_usage
-      ;;
-    *)
-      echo "Unknown option: $1" >&2
-      show_usage
-      ;;
+    --input|-i) INPUT_FILE="$2"; shift 2 ;;
+    --chunk|-c) CHUNK_NUM="$2"; shift 2 ;;
+    --chunk-size|-s) CHUNK_SIZE="$2"; shift 2 ;;
+    --lines|-l) LINE_RANGE="$2"; shift 2 ;;
+    --file|-f) FILE_PATH="$2"; shift 2 ;;
+    --summary) SHOW_SUMMARY=true; shift ;;
+    --info) SHOW_INFO=true; shift ;;
+    --help|-h) show_usage ;;
+    *) echo "Unknown option: $1" >&2; show_usage ;;
   esac
 done
 
@@ -87,11 +46,9 @@ if [[ ! -f "${INPUT_FILE}" ]]; then
   exit 1
 fi
 
-# Get total line count
 TOTAL_LINES=$(wc -l < "${INPUT_FILE}" | awk '{print $1}')
 TOTAL_CHUNKS=$(( (TOTAL_LINES + CHUNK_SIZE - 1) / CHUNK_SIZE ))
 
-# Show info mode
 if [[ "${SHOW_INFO}" == "true" ]]; then
   echo "File: ${INPUT_FILE}"
   echo "Total lines: ${TOTAL_LINES}"
@@ -101,104 +58,83 @@ if [[ "${SHOW_INFO}" == "true" ]]; then
   echo "Chunk breakdown:"
   for ((i=1; i<=TOTAL_CHUNKS; i++)); do
     start=$(( (i - 1) * CHUNK_SIZE + 1 ))
-    end=$(( i * CHUNK_SIZE ))
-    if [[ $end -gt $TOTAL_LINES ]]; then
-      end=$TOTAL_LINES
-    fi
+    end=$(( i * CHUNK_SIZE )); [[ $end -gt $TOTAL_LINES ]] && end=$TOTAL_LINES
     echo "  Chunk ${i}: lines ${start}-${end}"
   done
   exit 0
 fi
 
-# Show summary mode
+# Normalize only for parsing. The generated XML may contain two-space indentation;
+# diff payload lines themselves must retain their original content when printed.
+normalize_diff() {
+  sed -E 's/^  (diff --git|--- |\+\+\+ |@@ |\+|-| )/\1/' "${INPUT_FILE}"
+}
+
 if [[ "${SHOW_SUMMARY}" == "true" ]]; then
-  echo "Changed files:"
-  # Count lines changed per file, matching Get-DiffSummary counts in read-diff.ps1
   awk '
-    { sub(/\r$/, "") }
-    /^diff --git a\/.+ b\// {
-      if (file != "") { printf "  %s (+%d/-%d)\n", file, added, removed }
-      # Skip the 13-char "diff --git a/" prefix; search " b/" from char 2
-      # to mirror the lazy (.+?) b/ match in Get-DiffSummary.
-      rest = substr($0, 14)
-      file = substr(rest, 1, index(substr(rest, 2), " b/"))
-      added = 0
-      removed = 0
-      next
+    function flush() {
+      if (path != "") printf "%s\t%d\t%d\n", path, added, removed
     }
-    file != "" && /^\+[^+]/ { added++ }
-    file != "" && /^-[^-]/ { removed++ }
-    END { if (file != "") { printf "  %s (+%d/-%d)\n", file, added, removed } }
-  ' < "${INPUT_FILE}" | LC_ALL=C sort -f
+    function clean(s) {
+      sub(/^a\//, "", s); sub(/^b\//, "", s); return s
+    }
+    function start_block() {
+      flush(); path=""; old=""; new=""; added=0; removed=0; in_hunk=0
+    }
+    /^diff --git([[:space:]]|$)/ { start_block(); next }
+    /^---[[:space:]]/ { if (old=="") { old=$0; sub(/^---[[:space:]]+/, "", old); sub(/[[:space:]].*$/, "", old); old=clean(old) } next }
+    /^\+\+\+[[:space:]]/ { if (new=="") { new=$0; sub(/^\+\+\+[[:space:]]+/, "", new); sub(/[[:space:]].*$/, "", new); new=clean(new) } next }
+    /^@@([[:space:]]|$)/ { in_hunk=1; next }
+    in_hunk && /^\+/ { added++; next }
+    in_hunk && /^-/ { removed++; next }
+    END { if (new != "") path=new; else path=old; flush() }
+  ' < <(normalize_diff) | LC_ALL=C sort -t $'\t' -k1,1 | awk -F '\t' '{ printf "  %s (+%d/-%d)\n", $1, $2, $3 }'
+  echo "Changed files:" > /tmp/read-diff-summary-header.$$
+  { echo "Changed files:"; awk '
+    function flush() { if (path != "") printf "  %s (+%d/-%d)\n", path, added, removed }
+    /^diff --git([[:space:]]|$)/ { if (seen++) flush(); path=""; old=""; new=""; added=0; removed=0; in_hunk=0; next }
+    /^---[[:space:]]/ { if (old=="") { old=$0; sub(/^---[[:space:]]+/, "", old); sub(/[[:space:]].*$/, "", old); sub(/^a\//, "", old) } next }
+    /^\+\+\+[[:space:]]/ { if (new=="") { new=$0; sub(/^\+\+\+[[:space:]]+/, "", new); sub(/[[:space:]].*$/, "", new); sub(/^b\//, "", new) } next }
+    /^@@([[:space:]]|$)/ { in_hunk=1; next }
+    in_hunk && /^\+/ { added++; next }
+    in_hunk && /^-/ { removed++; next }
+    END { if (seen || path != "") { if (new != "") path=new; else path=old; flush() } }
+  ' < <(normalize_diff) | LC_ALL=C sort -f; } 
   exit 0
 fi
 
-# Extract diff for specific file
 if [[ -n "${FILE_PATH}" ]]; then
-  # Find the diff block for this file
-  awk -v file="${FILE_PATH}" '
-    /^diff --git/ {
-      if (printing) { printing = 0 }
-      if ($0 ~ "a/" file " b/") { printing = 1 }
+  awk -v wanted="${FILE_PATH}" '
+    function clean(s) { sub(/^a\//, "", s); sub(/^b\//, "", s); return s }
+    function finish() { if (printing) exit }
+    /^diff --git([[:space:]]|$)/ {
+      if (printing) exit
+      printing=0; old=""; new=""; block=""
     }
-    printing { print }
-  ' "${INPUT_FILE}"
+    { block = block $0 ORS }
+    /^---[[:space:]]/ { old=$0; sub(/^---[[:space:]]+/, "", old); sub(/[[:space:]].*$/, "", old); old=clean(old) }
+    /^\+\+\+[[:space:]]/ { new=$0; sub(/^\+\+\+[[:space:]]+/, "", new); sub(/[[:space:]].*$/, "", new); new=clean(new); if (old==wanted || new==wanted) { printf "%s", block; printing=1 } }
+  ' < <(normalize_diff)
   exit 0
 fi
 
-# Read by chunk number
 if [[ -n "${CHUNK_NUM}" ]]; then
-  if [[ ! "${CHUNK_NUM}" =~ ^[0-9]+$ ]] || [[ "${CHUNK_NUM}" -lt 1 ]]; then
-    echo "Error: Invalid chunk number: ${CHUNK_NUM}" >&2
-    exit 1
-  fi
-
-  start=$(( (CHUNK_NUM - 1) * CHUNK_SIZE + 1 ))
-  end=$(( CHUNK_NUM * CHUNK_SIZE ))
-
-  if [[ $start -gt $TOTAL_LINES ]]; then
-    echo "Error: Chunk ${CHUNK_NUM} exceeds file (only ${TOTAL_CHUNKS} chunks available)" >&2
-    exit 1
-  fi
-
-  if [[ $end -gt $TOTAL_LINES ]]; then
-    end=$TOTAL_LINES
-  fi
-
-  echo "# Chunk ${CHUNK_NUM}/${TOTAL_CHUNKS} (lines ${start}-${end} of ${TOTAL_LINES})"
-  echo ""
-  sed -n "${start},${end}p" "${INPUT_FILE}"
-  exit 0
+  [[ "${CHUNK_NUM}" =~ ^[0-9]+$ ]] && [[ "${CHUNK_NUM}" -ge 1 ]] || { echo "Error: Invalid chunk number: ${CHUNK_NUM}" >&2; exit 1; }
+  start=$(( (CHUNK_NUM - 1) * CHUNK_SIZE + 1 )); end=$(( CHUNK_NUM * CHUNK_SIZE ))
+  if [[ $start -gt $TOTAL_LINES ]]; then echo "Error: Chunk ${CHUNK_NUM} exceeds file (only ${TOTAL_CHUNKS} chunks available)" >&2; exit 1; fi
+  [[ $end -gt $TOTAL_LINES ]] && end=$TOTAL_LINES
+  echo "# Chunk ${CHUNK_NUM}/${TOTAL_CHUNKS} (lines ${start}-${end} of ${TOTAL_LINES})"; echo ""; sed -n "${start},${end}p" "${INPUT_FILE}"; exit 0
 fi
 
-# Read by line range
 if [[ -n "${LINE_RANGE}" ]]; then
-  # Support both comma and dash separators
   LINE_RANGE="${LINE_RANGE//,/-}"
-  if [[ ! "${LINE_RANGE}" =~ ^[0-9]+-[0-9]+$ ]]; then
-    echo "Error: Invalid line range format. Use START,END or START-END" >&2
-    exit 1
-  fi
-
-  start="${LINE_RANGE%%-*}"
-  end="${LINE_RANGE##*-}"
-
-  if [[ $start -gt $TOTAL_LINES ]]; then
-    echo "Error: Start line ${start} exceeds file length (${TOTAL_LINES} lines)" >&2
-    exit 1
-  fi
-
-  if [[ $end -gt $TOTAL_LINES ]]; then
-    end=$TOTAL_LINES
-  fi
-
-  echo "# Lines ${start}-${end} of ${TOTAL_LINES}"
-  echo ""
-  sed -n "${start},${end}p" "${INPUT_FILE}"
-  exit 0
+  [[ "${LINE_RANGE}" =~ ^[0-9]+-[0-9]+$ ]] || { echo "Error: Invalid line range format. Use START,END or START-END" >&2; exit 1; }
+  start="${LINE_RANGE%%-*}"; end="${LINE_RANGE##*-}"
+  [[ $start -le $TOTAL_LINES ]] || { echo "Error: Start line ${start} exceeds file length (${TOTAL_LINES} lines)" >&2; exit 1; }
+  [[ $end -gt $TOTAL_LINES ]] && end=$TOTAL_LINES
+  echo "# Lines ${start}-${end} of ${TOTAL_LINES}"; echo ""; sed -n "${start},${end}p" "${INPUT_FILE}"; exit 0
 fi
 
-# Default: show chunk info and first chunk preview
 echo "File: ${INPUT_FILE}"
 echo "Total lines: ${TOTAL_LINES}"
 echo "Total chunks: ${TOTAL_CHUNKS} (at ${CHUNK_SIZE} lines/chunk)"
