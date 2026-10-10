@@ -64,13 +64,12 @@ if [[ "${SHOW_INFO}" == "true" ]]; then
   exit 0
 fi
 
-# Normalize only for parsing. The generated XML may contain two-space indentation;
-# diff payload lines themselves must retain their original content when printed.
 normalize_diff() {
   sed -E 's/^  (diff --git|--- |\+\+\+ |@@ |\+|-| )/\1/' "${INPUT_FILE}"
 }
 
 if [[ "${SHOW_SUMMARY}" == "true" ]]; then
+  echo "Changed files:"
   awk '
     function flush() {
       if (path != "") printf "%s\t%d\t%d\n", path, added, removed
@@ -78,42 +77,45 @@ if [[ "${SHOW_SUMMARY}" == "true" ]]; then
     function clean(s) {
       sub(/^a\//, "", s); sub(/^b\//, "", s); return s
     }
-    function start_block() {
-      flush(); path=""; old=""; new=""; added=0; removed=0; in_hunk=0
+    /^diff --git([[:space:]]|$)/ {
+      if (seen++) flush()
+      path=""; old=""; new=""; added=0; removed=0; in_hunk=0
+      next
     }
-    /^diff --git([[:space:]]|$)/ { start_block(); next }
-    /^---[[:space:]]/ { if (old=="") { old=$0; sub(/^---[[:space:]]+/, "", old); sub(/[[:space:]].*$/, "", old); old=clean(old) } next }
-    /^\+\+\+[[:space:]]/ { if (new=="") { new=$0; sub(/^\+\+\+[[:space:]]+/, "", new); sub(/[[:space:]].*$/, "", new); new=clean(new) } next }
+    /^---[[:space:]]/ {
+      if (old=="") { old=$0; sub(/^---[[:space:]]+/, "", old); old=clean(old) }
+      next
+    }
+    /^\+\+\+[[:space:]]/ {
+      if (new=="") { new=$0; sub(/^\+\+\+[[:space:]]+/, "", new); new=clean(new) }
+      next
+    }
     /^@@([[:space:]]|$)/ { in_hunk=1; next }
     in_hunk && /^\+/ { added++; next }
     in_hunk && /^-/ { removed++; next }
-    END { if (new != "") path=new; else path=old; flush() }
-  ' < <(normalize_diff) | LC_ALL=C sort -t $'\t' -k1,1 | awk -F '\t' '{ printf "  %s (+%d/-%d)\n", $1, $2, $3 }'
-  echo "Changed files:" > /tmp/read-diff-summary-header.$$
-  { echo "Changed files:"; awk '
-    function flush() { if (path != "") printf "  %s (+%d/-%d)\n", path, added, removed }
-    /^diff --git([[:space:]]|$)/ { if (seen++) flush(); path=""; old=""; new=""; added=0; removed=0; in_hunk=0; next }
-    /^---[[:space:]]/ { if (old=="") { old=$0; sub(/^---[[:space:]]+/, "", old); sub(/[[:space:]].*$/, "", old); sub(/^a\//, "", old) } next }
-    /^\+\+\+[[:space:]]/ { if (new=="") { new=$0; sub(/^\+\+\+[[:space:]]+/, "", new); sub(/[[:space:]].*$/, "", new); sub(/^b\//, "", new) } next }
-    /^@@([[:space:]]|$)/ { in_hunk=1; next }
-    in_hunk && /^\+/ { added++; next }
-    in_hunk && /^-/ { removed++; next }
-    END { if (seen || path != "") { if (new != "") path=new; else path=old; flush() } }
-  ' < <(normalize_diff) | LC_ALL=C sort -f; } 
+    END {
+      if (new != "") path=new; else path=old
+      flush()
+    }
+  ' < <(normalize_diff) |
+  LC_ALL=C sort -t $'\t' -k1,1 |
+  awk -F '\t' '{ printf "  %s (+%d/-%d)\n", $1, $2, $3 }'
   exit 0
 fi
 
 if [[ -n "${FILE_PATH}" ]]; then
   awk -v wanted="${FILE_PATH}" '
     function clean(s) { sub(/^a\//, "", s); sub(/^b\//, "", s); return s }
-    function finish() { if (printing) exit }
     /^diff --git([[:space:]]|$)/ {
       if (printing) exit
       printing=0; old=""; new=""; block=""
     }
     { block = block $0 ORS }
-    /^---[[:space:]]/ { old=$0; sub(/^---[[:space:]]+/, "", old); sub(/[[:space:]].*$/, "", old); old=clean(old) }
-    /^\+\+\+[[:space:]]/ { new=$0; sub(/^\+\+\+[[:space:]]+/, "", new); sub(/[[:space:]].*$/, "", new); new=clean(new); if (old==wanted || new==wanted) { printf "%s", block; printing=1 } }
+    /^---[[:space:]]/ { old=$0; sub(/^---[[:space:]]+/, "", old); old=clean(old) }
+    /^\+\+\+[[:space:]]/ {
+      new=$0; sub(/^\+\+\+[[:space:]]+/, "", new); new=clean(new)
+      if (old==wanted || new==wanted) { printf "%s", block; printing=1 }
+    }
   ' < <(normalize_diff)
   exit 0
 fi
