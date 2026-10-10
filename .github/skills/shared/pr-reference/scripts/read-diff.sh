@@ -110,6 +110,7 @@ if [[ -n "${FILE_PATH}" ]]; then
       if (printing) exit
       printing=0; old=""; new=""; block=""
     }
+    printing { print; next }
     { block = block $0 ORS }
     /^---[[:space:]]/ { old=$0; sub(/^---[[:space:]]+/, "", old); old=clean(old) }
     /^\+\+\+[[:space:]]/ {
